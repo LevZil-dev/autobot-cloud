@@ -43,6 +43,9 @@ except ImportError:
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 _email_monitor_instance = None
+_sender_cache: dict[int, dict[int, dict]] = {}
+_waiting_for_custom_delete: set[int] = set()
+_custom_delete_cache: dict[int, str] = {}
 
 
 def get_email_monitor():
@@ -255,21 +258,45 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
                 await query.answer(f"Ошибка: {e}", show_alert=True)
 
         elif action == "senders":
-            await query.answer("Анализ отправителей...")
-            await query.message.edit_text("⏳ Анализирую недавние входящие сообщения...")
+            await query.answer("Отслеживание всех отправителей...")
+            await query.message.edit_text("⏳ Анализирую входящие сообщения и активных отправителей...")
             try:
-                senders = await asyncio.to_thread(monitor.get_top_senders, 8, 35)
-                if not senders:
-                    text = "👥 *Отправители:* Непрочитанных писем не найдено."
+                user_id = query.from_user.id
+                tracked = await asyncio.to_thread(monitor.get_tracked_senders, 50, 8)
+                if not tracked:
+                    text = "👥 *Отслеживание отправителей:* Непрочитанных писем не найдено."
+                    await query.message.edit_text(text, parse_mode="Markdown", reply_markup=back_kb)
                 else:
-                    lines = ["👥 *Топ отправителей непрочитанных писем:*\n"]
-                    for i, item in enumerate(senders, 1):
-                        s_name = item["sender"]
-                        count = item["count"]
-                        lines.append(f"**{i}.** `{s_name}` — **{count}** писем")
-                    lines.append("\n💡 _Совет: чтобы очистить спам от неизвестных отправителей, нажмите кнопку ниже._")
+                    _sender_cache[user_id] = {i: s for i, s in enumerate(tracked, 1)}
+                    lines = [
+                        "👥 *Отслеживание отправителей (Входящие)*\n"
+                        "_(Рейтинг активности по недавним непрочитанным письмам)_\n"
+                    ]
+                    for i, item in enumerate(tracked, 1):
+                        lines.append(f"**{i}.** 👤 **{item['name']}**\n   📧 `{item['email']}` — **{item['unread']}** непр.\n")
+                    lines.append("👇 *Нажмите на отправителя, чтобы удалить все письма от него:*")
                     text = "\n".join(lines)
-                await query.message.edit_text(text, parse_mode="Markdown", reply_markup=back_kb)
+
+                    sender_buttons = []
+                    row = []
+                    for i, s in enumerate(tracked, 1):
+                        s_label = f"🗑️ {i}. {s['name'][:10]}"
+                        row.append(InlineKeyboardButton(text=s_label, callback_data=f"sndr:p:{i}"))
+                        if len(row) == 2:
+                            sender_buttons.append(row)
+                            row = []
+                    if row:
+                        sender_buttons.append(row)
+
+                    sender_buttons.append([
+                        InlineKeyboardButton(text="🔍 Удалить по email/домену", callback_data="sndr:custom"),
+                        InlineKeyboardButton(text="🔄 Обновить", callback_data="mail:senders"),
+                    ])
+                    sender_buttons.append([
+                        InlineKeyboardButton(text="🔙 Назад к почте", callback_data="mail:refresh"),
+                    ])
+                    kb = InlineKeyboardMarkup(inline_keyboard=sender_buttons)
+                    await query.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
             except Exception as e:
                 await query.message.edit_text(f"❌ Ошибка анализа отправителей: {e}", reply_markup=back_kb)
 
@@ -389,6 +416,154 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
             await query.answer("Панель закрыта")
             await query.message.delete()
 
+    @dp.callback_query(F.data.startswith("sndr:"))
+    async def handle_sender_callbacks(query: types.CallbackQuery):
+        user_id = query.from_user.id
+        parts = query.data.split(":")
+        sub = parts[1]
+        monitor = get_email_monitor()
+        if not monitor:
+            await query.answer("Модуль почты недоступен", show_alert=True)
+            return
+
+        if sub == "p":
+            idx = int(parts[2])
+            user_cache = _sender_cache.get(user_id, {})
+            sender = user_cache.get(idx)
+            if not sender:
+                await query.answer("Данные устарели, обновите список", show_alert=True)
+                return
+
+            await query.answer("Загрузка статистики отправителя...")
+            email_addr = sender["email"]
+            name = sender["name"]
+            details = await asyncio.to_thread(monitor.get_sender_details, email_addr)
+
+            total_count = details.get("total", 0)
+            unread_count = details.get("unread", 0)
+
+            text = (
+                f"📧 *Управление письмами отправителя:*\n\n"
+                f"• **Имя:** {name}\n"
+                f"• **Email:** `{email_addr}`\n"
+                f"• **Непрочитанных писем:** **{unread_count:,}**\n"
+                f"• **Всего во Входящих:** **{total_count:,}**\n\n"
+                f"👇 _Выберите вариант удаления:_"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text=f"🗑️ Только непрочитанные ({unread_count})", callback_data=f"sndr:ask:u:{idx}"),
+                    ],
+                    [
+                        InlineKeyboardButton(text=f"🔥 ВСЕ письма во Входящих ({total_count})", callback_data=f"sndr:ask:a:{idx}"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="🔙 К списку отправителей", callback_data="mail:senders"),
+                    ],
+                ]
+            )
+            await query.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+
+        elif sub == "ask":
+            del_type = parts[2]
+            idx = int(parts[3])
+            user_cache = _sender_cache.get(user_id, {})
+            sender = user_cache.get(idx)
+            if not sender:
+                await query.answer("Данные устарели", show_alert=True)
+                return
+
+            type_desc = "непрочитанных" if del_type == "u" else "ВСЕХ"
+            text = (
+                f"⚠️ *Подтверждение удаления писем!*\n\n"
+                f"Вы уверены, что хотите переместить в Корзину **{type_desc}** письма от:\n"
+                f"📧 `{sender['email']}` ({sender['name']})?\n\n"
+                f"💡 _Письма будут помещены в папку «Корзина» (хранятся 30 дней)._"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🔥 Да, переместить в Корзину", callback_data=f"sndr:do:{del_type}:{idx}"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="❌ Отмена", callback_data=f"sndr:p:{idx}"),
+                    ],
+                ]
+            )
+            await query.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+
+        elif sub == "do":
+            del_type = parts[2]
+            idx = int(parts[3])
+            user_cache = _sender_cache.get(user_id, {})
+            sender = user_cache.get(idx)
+            if not sender:
+                await query.answer("Данные устарели", show_alert=True)
+                return
+
+            only_unread = (del_type == "u")
+            await query.answer("Удаление писем...")
+            await query.message.edit_text(f"⏳ Перемещаю письма от `{sender['email']}` в Корзину...")
+
+            res = await asyncio.to_thread(monitor.delete_all_from_sender, sender["email"], only_unread=only_unread, force=True)
+            deleted_count = res.get("count", 0)
+
+            text = (
+                f"✅ *Очистка завершена!*\n\n"
+                f"• **Перемещено в Корзину:** `{deleted_count}` писем\n"
+                f"• **Отправитель:** `{sender['email']}`\n"
+                f"• **Статус:** В Корзине 🗑️\n"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="👥 К списку отправителей", callback_data="mail:senders"),
+                        InlineKeyboardButton(text="📬 Главное меню", callback_data="mail:refresh"),
+                    ]
+                ]
+            )
+            await query.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+
+        elif sub == "custom":
+            _waiting_for_custom_delete.add(user_id)
+            await query.answer()
+            await query.message.answer(
+                "✏️ *Удаление писем конкретного отправителя:*\n\n"
+                "Отправьте в чат email или домен (например: `news@news.ozon.ru` или `aliexpress.com`), "
+                "чтобы найти и удалить все письма от него.",
+                parse_mode="Markdown"
+            )
+
+        elif sub == "c_do":
+            del_type = parts[2]
+            target = _custom_delete_cache.get(user_id)
+            if not target:
+                await query.answer("Цель не найдена", show_alert=True)
+                return
+
+            only_unread = (del_type == "u")
+            await query.answer("Удаление...")
+            await query.message.edit_text(f"⏳ Перемещаю письма от `{target}` в Корзину...")
+            res = await asyncio.to_thread(monitor.delete_all_from_sender, target, only_unread=only_unread, force=True)
+            deleted = res.get("count", 0)
+
+            text = (
+                f"✅ *Очистка завершена!*\n\n"
+                f"• **Удалено писем:** `{deleted}`\n"
+                f"• **Целевой адрес:** `{target}`\n"
+                f"• **Статус:** Перемещены в Корзину 🗑️"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="👥 К списку отправителей", callback_data="mail:senders"),
+                        InlineKeyboardButton(text="📬 Меню почты", callback_data="mail:refresh"),
+                    ]
+                ]
+            )
+            await query.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+
     # Inline Button Callback Handler (Confirmations / Approvals)
     @dp.callback_query(F.data.startswith("confirm:") | F.data.startswith("reject:"))
     async def handle_confirmation_callback(query: types.CallbackQuery):
@@ -411,6 +586,46 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
     @dp.message(F.text)
     async def handle_remote_command(message: types.Message):
         text = message.text.strip()
+        user_id = message.from_user.id
+
+        if user_id in _waiting_for_custom_delete:
+            _waiting_for_custom_delete.discard(user_id)
+            target = text.strip().lower()
+            status_msg = await message.answer(f"🔍 Поиск писем от '{target}'...")
+            monitor = get_email_monitor()
+            if not monitor:
+                await status_msg.edit_text("❌ Модуль управления почтой недоступен.")
+                return
+
+            details = await asyncio.to_thread(monitor.get_sender_details, target)
+            total = details.get("total", 0)
+            unread = details.get("unread", 0)
+            if total == 0:
+                await status_msg.edit_text(f"ℹ️ Во Входящих не найдено писем от `{target}`.")
+                return
+
+            _custom_delete_cache[user_id] = target
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text=f"🗑️ Непрочитанные ({unread})", callback_data="sndr:c_do:u"),
+                        InlineKeyboardButton(text=f"🔥 ВСЕ письма ({total})", callback_data="sndr:c_do:a"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="❌ Отмена", callback_data="mail:senders"),
+                    ],
+                ]
+            )
+            await status_msg.edit_text(
+                f"📧 *Найдено писем от:* `{target}`\n\n"
+                f"• **Непрочитанных:** **{unread}**\n"
+                f"• **Всего во Входящих:** **{total}**\n\n"
+                f"👇 _Выберите, какие письма переместить в Корзину:_",
+                parse_mode="Markdown",
+                reply_markup=kb,
+            )
+            return
+
         if text.startswith("/") or text in ["📊 Статус процессов", "📸 Снимок экрана", "⚡ Проверка связи", "🧹 Очистить кэш", "📬 Управление почтой"]:
             return
 

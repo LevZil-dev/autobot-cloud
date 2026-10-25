@@ -185,6 +185,121 @@ class EmailMonitor:
             except Exception:
                 pass
 
+    def get_tracked_senders(self, scan_batch: int = 50, limit: int = 10) -> list[dict[str, Any]]:
+        """Scans recent unread messages and aggregates full sender details (name, email, unread count)."""
+        from email.utils import parseaddr
+        imap = self.connect()
+        try:
+            imap.select("INBOX", readonly=True)
+            status, unread = imap.search(None, "UNSEEN")
+            if status != "OK" or not unread[0]:
+                return []
+            ids = unread[0].split()
+            batch = ids[-scan_batch:]
+            res, data = imap.fetch(b",".join(batch), "(BODY.PEEK[HEADER.FIELDS (FROM)])")
+            senders_map: dict[str, dict[str, Any]] = {}
+            if res == "OK":
+                for item in data:
+                    if isinstance(item, tuple) and len(item) == 2:
+                        msg = email.message_from_bytes(item[1])
+                        raw_from = msg.get("From", "")
+                        name, addr = parseaddr(raw_from)
+                        addr = addr.lower().strip()
+                        clean_name = decode_str(name).strip() or (addr.split("@")[0] if "@" in addr else addr)
+                        if addr:
+                            if addr not in senders_map:
+                                senders_map[addr] = {
+                                    "name": clean_name,
+                                    "email": addr,
+                                    "unread": 0,
+                                    "domain": addr.split("@")[-1] if "@" in addr else "",
+                                }
+                            senders_map[addr]["unread"] += 1
+
+            sorted_senders = sorted(senders_map.values(), key=lambda x: x["unread"], reverse=True)
+            return sorted_senders[:limit]
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+    def get_sender_details(self, sender_email: str) -> dict[str, Any]:
+        """Gets exact total and unread email count for a specific sender address or domain."""
+        imap = self.connect()
+        try:
+            imap.select("INBOX", readonly=True)
+            status, all_matches = imap.search(None, "FROM", f'"{sender_email}"')
+            all_ids = all_matches[0].split() if all_matches and all_matches[0] else []
+
+            status, unread_matches = imap.search(None, "UNSEEN", "FROM", f'"{sender_email}"')
+            unread_ids = unread_matches[0].split() if unread_matches and unread_matches[0] else []
+
+            return {
+                "sender": sender_email,
+                "total": len(all_ids),
+                "unread": len(unread_ids),
+            }
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+    def delete_all_from_sender(self, sender_query: str, only_unread: bool = False, force: bool = False) -> dict[str, Any]:
+        """Deletes (moves to Trash) all emails from a specific sender or domain."""
+        imap = self.connect()
+        try:
+            imap.select("INBOX")
+            if only_unread:
+                status, matches = imap.search(None, "UNSEEN", "FROM", f'"{sender_query}"')
+            else:
+                status, matches = imap.search(None, "FROM", f'"{sender_query}"')
+
+            ids = matches[0].split() if matches and matches[0] else []
+            count = len(ids)
+
+            if count == 0:
+                return {
+                    "success": True,
+                    "count": 0,
+                    "sender": sender_query,
+                    "message": f"Писем от '{sender_query}' не найдено.",
+                }
+
+            if self.dry_run and not force:
+                return {
+                    "success": True,
+                    "count": count,
+                    "dry_run": True,
+                    "sender": sender_query,
+                    "message": f"Найдено {count} писем от '{sender_query}'. (Режим симуляции: письма не удалены).",
+                }
+
+            # Batch delete in chunks of 100
+            for i in range(0, count, 100):
+                chunk = ids[i : i + 100]
+                chunk_bytes = b",".join(chunk)
+                try:
+                    imap.store(chunk_bytes, "+X-GM-LABELS", "\\Trash")
+                except Exception:
+                    pass
+                imap.store(chunk_bytes, "+FLAGS", "\\Deleted")
+
+            imap.expunge()
+            return {
+                "success": True,
+                "count": count,
+                "dry_run": False,
+                "sender": sender_query,
+                "message": f"Успешно перемещено в Корзину {count} писем от '{sender_query}'!",
+            }
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
     def get_recent_emails(self, limit: int = 5) -> list[dict[str, str]]:
         """Fetches metadata for the most recent unread incoming emails via bulk fetch."""
         imap = self.connect()
