@@ -134,6 +134,131 @@ class EmailMonitor:
         client.login(self.user, self.password)
         return client
 
+    def get_mailbox_stats(self) -> dict[str, Any]:
+        """Returns overview stats of the mailbox."""
+        imap = self.connect()
+        try:
+            status, counts = imap.select("INBOX", readonly=True)
+            total = int(counts[0].decode("utf-8")) if counts and counts[0] else 0
+            status, unread = imap.search(None, "UNSEEN")
+            unread_count = len(unread[0].split()) if unread and unread[0] else 0
+            return {
+                "user": self.user,
+                "provider": getattr(cfg, "EMAIL_PROVIDER", "gmail"),
+                "total": total,
+                "unread": unread_count,
+                "dry_run": self.dry_run,
+                "ai_active": self.ai_client is not None,
+            }
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+    def get_top_senders(self, limit: int = 8, scan_batch: int = 30) -> list[dict[str, Any]]:
+        """Scans recent unread messages and aggregates top senders via bulk fetch."""
+        from collections import Counter
+        imap = self.connect()
+        try:
+            imap.select("INBOX", readonly=True)
+            status, unread = imap.search(None, "UNSEEN")
+            if status != "OK" or not unread[0]:
+                return []
+            ids = unread[0].split()
+            batch = ids[-scan_batch:]
+            res, data = imap.fetch(b",".join(batch), "(BODY.PEEK[HEADER.FIELDS (FROM)])")
+            senders = []
+            if res == "OK":
+                for item in data:
+                    if isinstance(item, tuple) and len(item) == 2:
+                        msg = email.message_from_bytes(item[1])
+                        s = decode_str(msg.get("From", ""))
+                        if s:
+                            senders.append(s)
+            counts = Counter(senders).most_common(limit)
+            return [{"sender": s, "count": c} for s, c in counts]
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+    def get_recent_emails(self, limit: int = 5) -> list[dict[str, str]]:
+        """Fetches metadata for the most recent unread incoming emails via bulk fetch."""
+        imap = self.connect()
+        try:
+            imap.select("INBOX", readonly=True)
+            status, unread = imap.search(None, "UNSEEN")
+            if status != "OK" or not unread[0]:
+                return []
+            ids = unread[0].split()
+            batch = ids[-limit:]
+            res, data = imap.fetch(b",".join(batch), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+            results = []
+            if res == "OK":
+                for item in data:
+                    if isinstance(item, tuple) and len(item) == 2:
+                        msg = email.message_from_bytes(item[1])
+                        sender = decode_str(msg.get("From", "")) or "Неизвестно"
+                        subject = decode_str(msg.get("Subject", "")) or "Без темы"
+                        date = decode_str(msg.get("Date", ""))[:22]
+                        results.append({"sender": sender, "subject": subject, "date": date})
+            results.reverse()
+            return results
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+    def smart_sort_unseen(self, limit: int = 15) -> dict[str, list[dict[str, str]]]:
+        """Categorizes recent unread emails into Important, Newsletters, Social, and Spam via bulk fetch."""
+        categories: dict[str, list[dict[str, str]]] = {
+            "IMPORTANT": [],
+            "NEWSLETTER": [],
+            "SOCIAL": [],
+            "SPAM": [],
+        }
+        imap = self.connect()
+        try:
+            imap.select("INBOX", readonly=True)
+            status, unread = imap.search(None, "UNSEEN")
+            if status != "OK" or not unread[0]:
+                return categories
+            ids = unread[0].split()
+            batch = ids[-limit:]
+            res, data = imap.fetch(b",".join(batch), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+            if res == "OK":
+                for item in data:
+                    if isinstance(item, tuple) and len(item) == 2:
+                        msg = email.message_from_bytes(item[1])
+                        sender = decode_str(msg.get("From", ""))
+                        subject = decode_str(msg.get("Subject", ""))
+                        s_lower = (sender + " " + subject).lower()
+
+                        if any(k in s_lower for k in ["казино", "выигрыш", "crypto bonus", "viagra", "миллион", "jackpot", "займ"]):
+                            cat = "SPAM"
+                        elif any(k in s_lower for k in ["patreon", "discord", "youtube", "vk", "telegram", "github", "twitter", "reddit", "steam"]):
+                            cat = "SOCIAL"
+                        elif any(k in s_lower for k in ["ozon", "скидк", "распродаж", "акци", "заказ", "wildberries", "market", "яндекс", "пятерочка", "aliexpress", "tldr"]):
+                            cat = "NEWSLETTER"
+                        else:
+                            cat = "IMPORTANT"
+
+                        categories[cat].append({"sender": sender[:35], "subject": subject[:50]})
+            return categories
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+    def toggle_dry_run(self) -> bool:
+        """Toggles dry run mode."""
+        self.dry_run = not self.dry_run
+        return self.dry_run
+
     def classify_email_with_ai(self, sender: str, subject: str, snippet: str) -> dict[str, Any]:
         """Classifies email using Gemini AI into SPAM, PHISHING, NEWSLETTER, or IMPORTANT."""
         if not self.ai_client:
