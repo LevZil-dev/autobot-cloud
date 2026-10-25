@@ -1,0 +1,15 @@
+[Unit]
+Description=AutoBot 24/7 Autonomous Cloud Worker
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/autobot
+ExecStart=/usr/bin/python3 cloud/run_cloud_worker.py
+Restart=always
+RestartSec=10
+EnvironmentFile=/opt/autobot/.env
+
+[Install]
+WantedBy=multi-user.target
