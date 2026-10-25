@@ -79,9 +79,10 @@ bot_dp = None
 bg_tasks = []
 
 
-async def email_worker_loop():
+async def email_worker_loop(monitor: EmailMonitor | None = None):
     """Background periodic email checker."""
-    monitor = EmailMonitor()
+    if monitor is None:
+        monitor = EmailMonitor()
     print("[Cloud Worker] Фоновый цикл проверки почты запущен.")
     while True:
         try:
@@ -122,7 +123,7 @@ async def lifespan(app: FastAPI):
             print(f"❌ [Render] Ошибка запуска Telegram бота: {e}")
 
     # 2. Start Email Cleaner loop
-    t_email = asyncio.create_task(email_worker_loop())
+    t_email = asyncio.create_task(email_worker_loop(monitor=email_mon))
     bg_tasks.append(t_email)
 
     # 3. Send Telegram notification on successful boot

@@ -128,6 +128,16 @@ class EmailMonitor:
         self._all_senders_cache: list[dict[str, Any]] = []
         self._all_senders_cache_time: float = 0.0
 
+        # Monitoring and reporting cache
+        self.last_scan_info: dict[str, Any] = {
+            "timestamp": "Ожидание первого сканирования",
+            "checked": 0,
+            "spam": 0,
+            "important": 0,
+            "total_unseen": 0,
+            "actions": [],
+        }
+
     def connect(self) -> imaplib.IMAP4_SSL:
         """Establishes an SSL connection to the IMAP server."""
         if not self.user or not self.password:
@@ -520,7 +530,34 @@ class EmailMonitor:
                 "recommended_action": "MOVE_TO_TRASH" if is_spam else "KEEP",
             }
 
-    def process_unread_emails(self) -> dict[str, Any]:
+    def get_monitoring_report(self, run_scan: bool = False) -> dict[str, Any]:
+        """
+        Generates a comprehensive email monitoring report.
+        If run_scan is True, performs a fresh scan of unread emails.
+        """
+        if run_scan:
+            self.process_unread_emails(send_tg_notification=False)
+
+        stats = self.get_mailbox_stats()
+        proc = process_registry.get("email_cleaner") if hasattr(process_registry, "get") else {}
+        worker_status = proc.get("status", "ONLINE") if isinstance(proc, dict) else "ONLINE"
+        worker_details = proc.get("details", "") if isinstance(proc, dict) else ""
+
+        return {
+            "user": self.user,
+            "provider": getattr(cfg, "EMAIL_PROVIDER", "gmail"),
+            "server": f"{self.server}:{self.port}",
+            "total_inbox": stats.get("total", 0),
+            "unread_count": stats.get("unread", 0),
+            "dry_run": self.dry_run,
+            "ai_active": self.ai_client is not None,
+            "worker_status": worker_status,
+            "worker_details": worker_details,
+            "check_interval": getattr(cfg, "CHECK_INTERVAL_SECONDS", 600),
+            "last_scan": self.last_scan_info,
+        }
+
+    def process_unread_emails(self, send_tg_notification: bool = False) -> dict[str, Any]:
         """Scans unread emails, analyzes them, and cleans spam."""
         process_registry.update("email_cleaner", status="RUNNING", details="Проверка новых писем...")
         stats = {"checked": 0, "spam": 0, "important": 0, "actions": []}
@@ -538,6 +575,14 @@ class EmailMonitor:
             status, messages = imap.search(None, "UNSEEN")
             if status != "OK" or not messages[0]:
                 process_registry.update("email_cleaner", status="IDLE", details="Новых писем нет")
+                self.last_scan_info = {
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "checked": 0,
+                    "spam": 0,
+                    "important": 0,
+                    "total_unseen": 0,
+                    "actions": [],
+                }
                 return stats
 
             msg_ids = messages[0].split()
@@ -576,7 +621,6 @@ class EmailMonitor:
                     else:
                         # Move to Trash or mark Deleted
                         try:
-                            # Try moving to Trash or mark as Deleted
                             imap.store(mid, "+FLAGS", "\\Deleted")
                         except Exception as e:
                             print(f"Error marking email {mid} as deleted: {e}")
@@ -586,12 +630,23 @@ class EmailMonitor:
             if not self.dry_run:
                 imap.expunge()
 
+            # Record to last_scan_info cache
+            now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.last_scan_info = {
+                "timestamp": now_str,
+                "checked": stats["checked"],
+                "spam": stats["spam"],
+                "important": stats["important"],
+                "total_unseen": stats.get("total_unseen", 0),
+                "actions": list(stats["actions"]),
+            }
+
             # Update process registry
             details = f"Проверено: {stats['checked']} | Спам: {stats['spam']} | Важные: {stats['important']}"
             process_registry.update("email_cleaner", status="IDLE", details=details)
 
-            # Send summary to Telegram if any emails were checked
-            if stats["checked"] > 0:
+            # Send summary to Telegram if explicitly requested or if actionable spam was detected
+            if (send_tg_notification or (stats["spam"] > 0 and not self.dry_run)) and stats["checked"] > 0:
                 summary = (
                     f"📬 *Отчёт мониторинга почты:*\n"
                     f"• Проверено новых писем: `{stats['checked']}`\n"

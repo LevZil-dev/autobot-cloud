@@ -92,19 +92,22 @@ def get_email_inline_keyboard(dry_run: bool = True) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
+                InlineKeyboardButton(text="📋 Отчет мониторинга", callback_data="mail:report"),
                 InlineKeyboardButton(text="👥 Все отправители (Каталог)", callback_data="mail:all_senders:1"),
+            ],
+            [
                 InlineKeyboardButton(text="📩 Свежие письма", callback_data="mail:recent"),
-            ],
-            [
                 InlineKeyboardButton(text="🏷️ Умная сортировка", callback_data="mail:sort"),
-                InlineKeyboardButton(text="🧹 Очистить спам сейчас", callback_data="mail:clean"),
             ],
             [
-                InlineKeyboardButton(text=f"⚙️ {mode_text}", callback_data="mail:toggle_mode"),
+                InlineKeyboardButton(text="🧹 Очистить спам сейчас", callback_data="mail:clean"),
                 InlineKeyboardButton(text="📊 Статистика ящика", callback_data="mail:stats"),
             ],
             [
+                InlineKeyboardButton(text=f"⚙️ {mode_text}", callback_data="mail:toggle_mode"),
                 InlineKeyboardButton(text="🔄 Обновить", callback_data="mail:refresh"),
+            ],
+            [
                 InlineKeyboardButton(text="❌ Закрыть", callback_data="mail:close"),
             ],
         ]
@@ -127,6 +130,88 @@ def format_email_menu_text(stats: dict) -> str:
         f"• **Классификатор:** `Gemini 3.8 Flash`\n\n"
         f"_Выберите действие в быстрой панели ниже:_"
     )
+
+
+async def show_email_monitoring_report(
+    target: types.Message | types.CallbackQuery,
+    monitor,
+    run_fresh_scan: bool = False,
+):
+    """
+    Отдельная функция вызова и отображения отчёта мониторинга почты.
+    Используется внутри команды /email, из inline-меню, а также при прямой команде /email report.
+    """
+    is_callback = isinstance(target, types.CallbackQuery)
+    if is_callback:
+        await target.answer("Формирую отчет мониторинга...")
+        msg = target.message
+    else:
+        msg = await target.answer("⏳ Составляю детальный отчёт мониторинга почты...")
+
+    try:
+        report_data = await asyncio.to_thread(monitor.get_monitoring_report, run_fresh_scan)
+
+        user = report_data.get("user") or "Не настроен"
+        provider = str(report_data.get("provider", "gmail")).upper()
+        server = report_data.get("server", "IMAP SSL")
+        total_inbox = report_data.get("total_inbox", 0)
+        unread = report_data.get("unread_count", 0)
+        dry_run = report_data.get("dry_run", True)
+        ai_active = report_data.get("ai_active", False)
+        worker_status = report_data.get("worker_status", "ONLINE")
+        check_interval = report_data.get("check_interval", 600) // 60
+        last_scan = report_data.get("last_scan", {})
+
+        mode_badge = "🛡️ *Симуляция (Dry Run)* — безопасный тест" if dry_run else "⚡ *Боевой режим* — удаление в Корзину"
+        ai_badge = "Gemini 3.8 Flash (активен)" if ai_active else "Резервный эвристический фильтр"
+        worker_badge = "🟢 ONLINE" if worker_status in ("IDLE", "RUNNING", "ACTIVE", "ONLINE") else f"⚠️ {worker_status}"
+
+        lines = [
+            "📋 *Детальный отчёт мониторинга почты*\n",
+            f"• 👤 **Почтовый ящик:** `{user}`",
+            f"• 🌐 **Сервер подключения:** `{server}` ({provider})",
+            f"• 🔄 **Фоновый мониторинг:** {worker_badge} *(периодичность: {check_interval} мин)*",
+            f"• 🛡️ **Режим работы:** {mode_badge}",
+            f"• 🤖 **AI-классификатор:** `{ai_badge}`\n",
+            "📊 *Текущее состояние ящика:*",
+            f"• Всего сообщений во Входящих: **{total_inbox:,}**",
+            f"• Непрочитанных сообщений: **{unread:,}**\n",
+            "⏱️ *Результаты последней проверки:*",
+            f"• Время сканирования: `{last_scan.get('timestamp', 'Не выполнялась')}`",
+            f"• Проверено новых писем: **{last_scan.get('checked', 0)}**",
+            f"• Выявлено спама: **{last_scan.get('spam', 0)}**",
+            f"• Важных писем оставлено: **{last_scan.get('important', 0)}**",
+        ]
+
+        actions = last_scan.get("actions", [])
+        if actions:
+            lines.append("\n📝 *Лог последних действий:*")
+            for act in actions[:4]:
+                lines.append(f"• {act}")
+        else:
+            lines.append("\n📝 *События:* Спам и подозрительные письма не обнаружены.")
+
+        lines.append("\n_Выберите действие в меню ниже:_")
+        text = "\n".join(lines)
+
+        report_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🔄 Обновить отчёт", callback_data="mail:report"),
+                    InlineKeyboardButton(text="⚡ Экспресс-проверка", callback_data="mail:report:scan"),
+                ],
+                [
+                    InlineKeyboardButton(text="🧹 Очистить спам сейчас", callback_data="mail:clean"),
+                    InlineKeyboardButton(text="🔙 Назад в меню почты", callback_data="mail:refresh"),
+                ],
+            ]
+        )
+
+        await msg.edit_text(text, parse_mode="Markdown", reply_markup=report_kb)
+
+    except Exception as e:
+        err_msg = f"❌ Ошибка получения отчёта мониторинга: {e}"
+        await msg.edit_text(err_msg)
 
 
 async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
@@ -214,15 +299,23 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
     # EMAIL MANAGEMENT FAST PANEL & COMMANDS
     # ==========================================
     @dp.message(Command("email"))
+    @dp.message(Command("email_report"))
     @dp.message(F.text == "📬 Управление почтой")
     async def cmd_email_menu(message: types.Message):
+        monitor = get_email_monitor()
+        if not monitor:
+            await message.answer("❌ Модуль управления почтой не найден. Проверьте настройки EMAIL_USER / EMAIL_PASS.")
+            return
+
+        text_cmd = (message.text or "").strip()
+        parts = text_cmd.split()
+        subcmd = parts[1].lower() if len(parts) > 1 else ""
+        if subcmd in ("report", "отчет", "отчёт", "monitoring", "мониторинг") or text_cmd.startswith("/email_report"):
+            await show_email_monitoring_report(message, monitor)
+            return
+
         status_msg = await message.answer("🔄 Подключение к почтовому ящику...")
         try:
-            monitor = get_email_monitor()
-            if not monitor:
-                await status_msg.edit_text("❌ Модуль управления почтой не найден. Проверьте настройки EMAIL_USER / EMAIL_PASS.")
-                return
-
             stats = await asyncio.to_thread(monitor.get_mailbox_stats)
             text = format_email_menu_text(stats)
             kb = get_email_inline_keyboard(stats.get("dry_run", True))
@@ -256,6 +349,10 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
                 await query.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
             except Exception as e:
                 await query.answer(f"Ошибка: {e}", show_alert=True)
+
+        elif action.startswith("report"):
+            run_fresh = (action == "report:scan")
+            await show_email_monitoring_report(query, monitor, run_fresh_scan=run_fresh)
 
         elif action.startswith("all_senders") or action == "senders":
             page = 1
