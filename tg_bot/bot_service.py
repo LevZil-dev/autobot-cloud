@@ -162,9 +162,9 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     """Main persistent navigation keyboard for Telegram."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📈 Брокер"), KeyboardButton(text="📬 Управление почтой")],
-            [KeyboardButton(text="📊 Статус процессов"), KeyboardButton(text="📸 Снимок экрана")],
-            [KeyboardButton(text="⚡ Проверка связи"), KeyboardButton(text="🧹 Очистить кэш")],
+            [KeyboardButton(text="📬 Управление почтой"), KeyboardButton(text="📊 Статус процессов")],
+            [KeyboardButton(text="📸 Снимок экрана"), KeyboardButton(text="🧹 Очистить кэш")],
+            [KeyboardButton(text="⚡ Проверка связи")],
         ],
         resize_keyboard=True,
     )
@@ -316,7 +316,6 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
             f"🤖 *AutoBot Control Hub* успешно подключен к вашему Telegram-аккаунту.\n\n"
             f"🔑 Ваш Chat ID: `{user_id}` сохранён как администратор.\n\n"
             f"Вам доступны быстрые функции:\n"
-            f"• 📈 *Брокер* — портфель Т-Инвестиций, AI-анализ новостей и инвестиционные сигналы (`/broker`).\n"
             f"• 📬 *Управление почтой* — аналитика, топ отправителей, умная сортировка и очистка спама (`/email`).\n"
             f"• 📊 *Статус процессов* — мониторинг всех фоновых задач и облачных воркеров (`/status`).\n"
             f"• 📸 *Снимок экрана* — удалённый скриншот вашего ПК (`/screenshot`).\n"
@@ -386,22 +385,12 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
     @dp.message(Command("broker"))
     @dp.message(F.text == "📈 Брокер")
     async def cmd_broker_menu(message: types.Message):
-        user_id = message.from_user.id
-        admin_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
-        if admin_id and BrokerSecurity and not BrokerSecurity.check_admin_access(user_id, admin_id):
-            await message.answer("⛔ *Доступ ограничен:* Раздел «Брокер» защищен и доступен только владельцу бота.")
-            return
-
-        status_msg = await message.answer("🔄 Загрузка данных Т-Инвестиций и AI-аналитики...")
-        try:
-            tc = get_tinkoff_client()
-            is_conf = tc.is_configured() if tc else False
-            portfolio = await asyncio.to_thread(tc.get_portfolio) if tc else {}
-            text = format_broker_menu_text(portfolio, is_conf)
-            kb = get_broker_inline_keyboard(is_conf)
-            await status_msg.edit_text(text, parse_mode="Markdown", reply_markup=kb)
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Ошибка загрузки брокерского пульта: {e}")
+        await message.answer(
+            "⏸️ *Раздел «Брокер» временно приостановлен.*\n\n"
+            "Все модули и алгоритмы сохранены в безопасности. Когда вы решите вернуться к финансовой аналитике, мы включим его в один клик.",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard(),
+        )
 
     @dp.callback_query(F.data.startswith("brk:"))
     async def handle_broker_callback(query: types.CallbackQuery):
