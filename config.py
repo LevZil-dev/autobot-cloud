@@ -30,6 +30,11 @@ CHECK_INTERVAL_SECONDS = int(os.getenv("EMAIL_CHECK_INTERVAL_SECONDS", "600"))  
 EMAIL_DRY_RUN = os.getenv("EMAIL_DRY_RUN", "true").lower() in ("true", "1", "yes")  # Safe mode by default
 REQUIRE_CONFIRMATION = os.getenv("EMAIL_REQUIRE_CONFIRMATION", "true").lower() in ("true", "1", "yes")
 
+# T-Invest (Tinkoff Investments) Credentials & Security
+TINKOFF_INVEST_TOKEN = os.getenv("TINKOFF_INVEST_TOKEN", "").strip()
+TINKOFF_ACCOUNT_ID = os.getenv("TINKOFF_ACCOUNT_ID", "").strip()
+TINKOFF_READ_ONLY_STRICT = os.getenv("TINKOFF_READ_ONLY_STRICT", "true").lower() in ("true", "1", "yes")
+
 # Known IMAP presets
 IMAP_PRESETS = {
     "gmail": "imap.gmail.com",

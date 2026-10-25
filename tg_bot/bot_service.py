@@ -74,13 +74,97 @@ def get_email_monitor():
     return None
 
 
+# Safe imports for Broker modules
+try:
+    from cloud.broker import BrokerSecurity, TinkoffClient, NewsAnalyzer, RecommendationEngine
+except ImportError:
+    try:
+        from broker import BrokerSecurity, TinkoffClient, NewsAnalyzer, RecommendationEngine
+    except ImportError:
+        BrokerSecurity = None
+        TinkoffClient = None
+        NewsAnalyzer = None
+        RecommendationEngine = None
+
+_tinkoff_client_instance = None
+_news_analyzer_instance = None
+_recommendation_engine_instance = None
+_waiting_for_ticker_analysis: set[int] = set()
+_waiting_for_broker_token: set[int] = set()
+
+
+def get_tinkoff_client():
+    global _tinkoff_client_instance
+    if _tinkoff_client_instance is None and TinkoffClient is not None:
+        _tinkoff_client_instance = TinkoffClient()
+    return _tinkoff_client_instance
+
+
+def get_news_analyzer():
+    global _news_analyzer_instance
+    if _news_analyzer_instance is None and NewsAnalyzer is not None:
+        _news_analyzer_instance = NewsAnalyzer()
+    return _news_analyzer_instance
+
+
+def get_recommendation_engine():
+    global _recommendation_engine_instance
+    if _recommendation_engine_instance is None and RecommendationEngine is not None:
+        _recommendation_engine_instance = RecommendationEngine(news_analyzer=get_news_analyzer())
+    return _recommendation_engine_instance
+
+
+def get_broker_inline_keyboard(is_configured: bool = False) -> InlineKeyboardMarkup:
+    """Builds inline menu for Broker & AI Investment Assistant."""
+    token_btn_text = "🔑 Изменить токен" if is_configured else "🔑 Подключить Т-Инвестиции"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💼 Мой портфель", callback_data="brk:portfolio"),
+                InlineKeyboardButton(text="🎯 Топ предложений (Идеи)", callback_data="brk:ideas"),
+            ],
+            [
+                InlineKeyboardButton(text="📰 AI-Пульс новостей", callback_data="brk:news"),
+                InlineKeyboardButton(text="🔍 Анализ тикера (акции)", callback_data="brk:search"),
+            ],
+            [
+                InlineKeyboardButton(text=token_btn_text, callback_data="brk:token"),
+                InlineKeyboardButton(text="🛡️ Безопасность и API", callback_data="brk:security"),
+            ],
+            [
+                InlineKeyboardButton(text="🔄 Обновить", callback_data="brk:refresh"),
+                InlineKeyboardButton(text="❌ Закрыть", callback_data="brk:close"),
+            ],
+        ]
+    )
+
+
+def format_broker_menu_text(portfolio_data: dict, is_configured: bool) -> str:
+    sec_status = "🔒 *Только чтение (Read-Only)* — сделки заблокированы"
+    mode_badge = "🟢 *Т-Инвестиции API подключен*" if is_configured else "🟡 *Демо-режим (Голубые фишки РФ)*"
+    total = portfolio_data.get("total_portfolio_rub", 0.0)
+    expected_yield = portfolio_data.get("expected_yield_rub", 0.0)
+    yield_sign = "+" if expected_yield >= 0 else ""
+    positions_count = portfolio_data.get("positions_count", 0)
+
+    return (
+        f"📈 *AI-Брокер & Инвестиционный ассистент*\n\n"
+        f"• **Статус:** {mode_badge}\n"
+        f"• **Режим безопасности:** {sec_status}\n"
+        f"• **AI-аналитик:** `Gemini 3.8 Flash (MOEX & T-Invest)`\n"
+        f"• **Оценка портфеля:** `{total:,.2f} ₽`\n"
+        f"• **Доходность:** `{yield_sign}{expected_yield:,.2f} ₽` ({positions_count} позиций)\n\n"
+        f"_Выберите раздел в быстрой панели ниже:_"
+    )
+
+
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     """Main persistent navigation keyboard for Telegram."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📬 Управление почтой"), KeyboardButton(text="📊 Статус процессов")],
-            [KeyboardButton(text="📸 Снимок экрана"), KeyboardButton(text="🧹 Очистить кэш")],
-            [KeyboardButton(text="⚡ Проверка связи")],
+            [KeyboardButton(text="📈 Брокер"), KeyboardButton(text="📬 Управление почтой")],
+            [KeyboardButton(text="📊 Статус процессов"), KeyboardButton(text="📸 Снимок экрана")],
+            [KeyboardButton(text="⚡ Проверка связи"), KeyboardButton(text="🧹 Очистить кэш")],
         ],
         resize_keyboard=True,
     )
@@ -232,7 +316,8 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
             f"🤖 *AutoBot Control Hub* успешно подключен к вашему Telegram-аккаунту.\n\n"
             f"🔑 Ваш Chat ID: `{user_id}` сохранён как администратор.\n\n"
             f"Вам доступны быстрые функции:\n"
-            f"• 📬 *Управление почтой* — аналитика, топ отправителей, умная сортировка и очистка спама.\n"
+            f"• 📈 *Брокер* — портфель Т-Инвестиций, AI-анализ новостей и инвестиционные сигналы (`/broker`).\n"
+            f"• 📬 *Управление почтой* — аналитика, топ отправителей, умная сортировка и очистка спама (`/email`).\n"
             f"• 📊 *Статус процессов* — мониторинг всех фоновых задач и облачных воркеров (`/status`).\n"
             f"• 📸 *Снимок экрана* — удалённый скриншот вашего ПК (`/screenshot`).\n"
             f"• ⚡ *Проверка связи* — пинг и статус соединения."
@@ -294,6 +379,237 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
             return
         res = tools.cleaner.clean_temp_files(max_age_seconds=0)
         await message.answer(f"🧹 *Очистка завершена:*\n{res}", parse_mode="Markdown")
+
+    # ==========================================
+    # BROKER & INVESTMENT ASSISTANT FAST PANEL
+    # ==========================================
+    @dp.message(Command("broker"))
+    @dp.message(F.text == "📈 Брокер")
+    async def cmd_broker_menu(message: types.Message):
+        user_id = message.from_user.id
+        admin_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+        if admin_id and BrokerSecurity and not BrokerSecurity.check_admin_access(user_id, admin_id):
+            await message.answer("⛔ *Доступ ограничен:* Раздел «Брокер» защищен и доступен только владельцу бота.")
+            return
+
+        status_msg = await message.answer("🔄 Загрузка данных Т-Инвестиций и AI-аналитики...")
+        try:
+            tc = get_tinkoff_client()
+            is_conf = tc.is_configured() if tc else False
+            portfolio = await asyncio.to_thread(tc.get_portfolio) if tc else {}
+            text = format_broker_menu_text(portfolio, is_conf)
+            kb = get_broker_inline_keyboard(is_conf)
+            await status_msg.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Ошибка загрузки брокерского пульта: {e}")
+
+    @dp.callback_query(F.data.startswith("brk:"))
+    async def handle_broker_callback(query: types.CallbackQuery):
+        user_id = query.from_user.id
+        admin_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+        if admin_id and BrokerSecurity and not BrokerSecurity.check_admin_access(user_id, admin_id):
+            await query.answer("⛔ Доступ ограничен", show_alert=True)
+            return
+
+        action = query.data.split(":", 1)[1]
+        tc = get_tinkoff_client()
+        is_conf = tc.is_configured() if tc else False
+
+        back_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🎯 Топ предложений", callback_data="brk:ideas"),
+                    InlineKeyboardButton(text="🔙 В меню Брокера", callback_data="brk:refresh"),
+                ]
+            ]
+        )
+
+        if action in ("refresh", "menu"):
+            await query.answer("Обновление данных...")
+            try:
+                portfolio = await asyncio.to_thread(tc.get_portfolio) if tc else {}
+                text = format_broker_menu_text(portfolio, is_conf)
+                kb = get_broker_inline_keyboard(is_conf)
+                await query.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+            except Exception as e:
+                await query.answer(f"Ошибка: {e}", show_alert=True)
+
+        elif action == "portfolio":
+            await query.answer("Загрузка состава портфеля...")
+            try:
+                portfolio = await asyncio.to_thread(tc.get_portfolio) if tc else {}
+                positions = portfolio.get("positions", [])
+                total_val = portfolio.get("total_portfolio_rub", 0.0)
+                tot_yield = portfolio.get("expected_yield_rub", 0.0)
+                is_demo = portfolio.get("is_demo", False)
+                y_sign = "+" if tot_yield >= 0 else ""
+
+                header = "💼 *Состав инвестиционного портфеля:*\n"
+                if is_demo:
+                    header += "_(Демо-режим: отображаются топ-5 голубых фишек Мосбиржи)_\n"
+                header += f"• **Стоимость:** `{total_val:,.2f} ₽`\n• **Доходность:** `{y_sign}{tot_yield:,.2f} ₽`\n\n"
+
+                lines = [header]
+                for i, p in enumerate(positions, 1):
+                    t = p.get("ticker") or p.get("figi") or "Акция"
+                    name = p.get("name") or t
+                    qty = p.get("quantity", 0)
+                    cur_p = p.get("current_price", 0.0)
+                    pos_y = p.get("yield", 0.0)
+                    pos_sign = "+" if pos_y >= 0 else ""
+                    lines.append(
+                        f"**{i}.** 📈 **{name}** (`{t}`)\n"
+                        f"   • {qty} шт. × {cur_p:,.2f} ₽ | Доход: `{pos_sign}{pos_y:,.2f} ₽`\n"
+                    )
+
+                text = "\n".join(lines)
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="🔍 Разобрать акцию", callback_data="brk:search"),
+                            InlineKeyboardButton(text="🔙 В меню Брокера", callback_data="brk:refresh"),
+                        ]
+                    ]
+                )
+                await query.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+            except Exception as e:
+                await query.message.edit_text(f"❌ Ошибка загрузки портфеля: {e}", reply_markup=back_kb)
+
+        elif action == "ideas":
+            await query.answer("Формирую топ предложений...")
+            await query.message.edit_text("⏳ Gemini 3.8 Flash анализирует рынок и отбирает лучшие идеи...")
+            try:
+                re = get_recommendation_engine()
+                ideas = await asyncio.to_thread(re.generate_top_proposals, 4) if re else []
+                lines = [
+                    "🎯 *ТОП Инвестиционных предложений (Gemini AI)*\n",
+                    "_(Сформировано на основе отчетностей, дивидендов и новостного фона)_\n"
+                ]
+                signal_emojis = {
+                    "BUY": "🟢 ПОКУПКА",
+                    "ACCUMULATE": "🟡 НАКАПЛИВАТЬ",
+                    "HOLD": "⚪ ДЕРЖАТЬ",
+                    "TAKE_PROFIT": "🔴 ФИКСАЦИЯ ПРИБЫЛИ",
+                }
+                for i, idea in enumerate(ideas, 1):
+                    sig = signal_emojis.get(idea.get("signal", "BUY"), "🟢 ПОКУПКА")
+                    lines.append(
+                        f"**{i}. {idea.get('name')}** (`{idea.get('ticker')}`)\n"
+                        f"• Сигнал: **{sig}** | Потенциал: **{idea.get('upside', '+15%')}**\n"
+                        f"• Горизонт: _{idea.get('horizon', 'Среднесрок')}_\n"
+                        f"• Риск: `{idea.get('risk', 'MEDIUM')}`\n"
+                        f"💡 _{idea.get('rationale')}_\n"
+                    )
+                text = "\n".join(lines)
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="🔄 Обновить идеи", callback_data="brk:ideas"),
+                            InlineKeyboardButton(text="📰 Пульс новостей", callback_data="brk:news"),
+                        ],
+                        [
+                            InlineKeyboardButton(text="🔙 В меню Брокера", callback_data="brk:refresh"),
+                        ]
+                    ]
+                )
+                await query.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+            except Exception as e:
+                await query.message.edit_text(f"❌ Ошибка генерации идей: {e}", reply_markup=back_kb)
+
+        elif action == "news":
+            await query.answer("Анализ новостей рынка...")
+            await query.message.edit_text("⏳ Считываю ленту РБК / Мосбиржи и оцениваю сентимент через Gemini...")
+            try:
+                na = get_news_analyzer()
+                sentiment_results = await asyncio.to_thread(na.analyze_news_sentiment) if na else []
+                lines = ["📰 *AI-Пульс новостей рынка:*\n"]
+                sent_emojis = {
+                    "BULLISH": "🟢 Позитивно (Бычий)",
+                    "BEARISH": "🔴 Негативно (Медвежий)",
+                    "NEUTRAL": "⚪ Нейтрально",
+                }
+                for i, item in enumerate(sentiment_results[:4], 1):
+                    sent_badge = sent_emojis.get(item.get("sentiment", "NEUTRAL"), "⚪ Нейтрально")
+                    tickers = ", ".join(item.get("affected_tickers", ["Рынок"]))
+                    lines.append(
+                        f"**{i}.** 📌 *{item.get('title')}*\n"
+                        f"• Влияние: {sent_badge} (оценка: `{item.get('score', 0.0)}`)\n"
+                        f"• Бумаги: `{tickers}`\n"
+                        f"• Разбор: _{item.get('impact')}_\n"
+                    )
+                text = "\n".join(lines)
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="🎯 Топ предложений", callback_data="brk:ideas"),
+                            InlineKeyboardButton(text="🔄 Обновить новости", callback_data="brk:news"),
+                        ],
+                        [
+                            InlineKeyboardButton(text="🔙 В меню Брокера", callback_data="brk:refresh"),
+                        ]
+                    ]
+                )
+                await query.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+            except Exception as e:
+                await query.message.edit_text(f"❌ Ошибка анализа новостей: {e}", reply_markup=back_kb)
+
+        elif action == "search":
+            _waiting_for_ticker_analysis.add(user_id)
+            await query.answer("Ожидание тикера...")
+            await query.message.edit_text(
+                "🔍 *Глубокий инвестиционный анализ акции*\n\n"
+                "Отправьте в чат тикер или название компании (например: `SBER`, `YDEX`, `LKOH`, `T`, `OZON`, `GAZP`, `NVTK`, `PLZL`):\n\n"
+                "Gemini AI проанализирует отчетность, дивидендную политику, драйверы роста и риски.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="brk:refresh")]]
+                )
+            )
+
+        elif action == "token":
+            _waiting_for_broker_token.add(user_id)
+            await query.answer("Подключение токена...")
+            masked = BrokerSecurity.mask_token(tc.token) if tc else "Не настроен"
+            instructions = (
+                f"🔑 *Безопасное подключение Т-Инвестиций*\n\n"
+                f"• Текущий токен: `{masked}`\n"
+                f"• Статус защиты: 🛡️ **Только для чтения (Read-Only)**\n\n"
+                f"📋 *Как выпустить токен за 1 минуту:*\n"
+                f"1. Откройте приложение **«Т-Инвестиции»** (или «Т-Банк»).\n"
+                f"2. Перейдите: **Профиль ➔ Настройки**.\n"
+                f"3. Пролистайте вниз до раздела **«Токен для OpenAPI»**.\n"
+                f"4. Нажмите **«Выпустить токен»**.\n"
+                f"5. ⚠️ **ВАЖНО:** Выберите пункт **«Только для чтения» (Read-Only)**!\n\n"
+                f"👇 *Отправьте полученный токен в этот чат.*\n"
+                f"_(Бот немедленно удалит ваше сообщение из чата для безопасности и сохранит токен в защищенной памяти)_"
+            )
+            await query.message.edit_text(
+                instructions,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="brk:refresh")]]
+                )
+            )
+
+        elif action == "security":
+            await query.answer("Гарантии безопасности")
+            sec_text = (
+                "🛡️ *Повышенный уровень защиты данных и банка*\n\n"
+                "1. **Строго Read-Only (Только чтение):**\n"
+                "Бот физически не содержит методов для совершения сделок или вывода денег. "
+                "Если токен имеет полные права, система блокирует его использование.\n\n"
+                "2. **Удаление сообщений из чата:**\n"
+                "При отправке токена в Telegram сообщение пользователя мгновенно удаляется, чтобы секрет не оставался в истории переписки.\n\n"
+                "3. **Admin Chat Lock:**\n"
+                "Доступ к финансовой аналитике разрешен исключительно подтвержденному Chat ID администратора.\n\n"
+                "4. **Zero Credentials Leak:**\n"
+                "Токены маскируются (`t.***xyz`) и никогда не записываются в открытые логи или публичный GitHub."
+            )
+            await query.message.edit_text(sec_text, parse_mode="Markdown", reply_markup=back_kb)
+
+        elif action == "close":
+            await query.answer("Раздел закрыт")
+            await query.message.delete()
 
     # ==========================================
     # EMAIL MANAGEMENT FAST PANEL & COMMANDS
@@ -778,7 +1094,101 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
             )
             return
 
-        if text.startswith("/") or text in ["📊 Статус процессов", "📸 Снимок экрана", "⚡ Проверка связи", "🧹 Очистить кэш", "📬 Управление почтой"]:
+        # Check if user is sending a broker token
+        if user_id in _waiting_for_broker_token or text.startswith("t."):
+            _waiting_for_broker_token.discard(user_id)
+            # Instantly delete user's message containing token from Telegram chat for safety
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+            admin_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+            if admin_id and BrokerSecurity and not BrokerSecurity.check_admin_access(user_id, admin_id):
+                await message.answer("⛔ Только администратор может подключать токен Т-Инвестиций.")
+                return
+
+            status_msg = await message.answer("🔐 Проверка и безопасная привязка токена Т-Инвестиций...")
+            tc = get_tinkoff_client()
+            if not tc:
+                await status_msg.edit_text("❌ Модуль брокера недоступен.")
+                return
+
+            res = await asyncio.to_thread(tc.set_token, text)
+            if not res.get("success"):
+                await status_msg.edit_text(f"❌ {res.get('error')}")
+                return
+
+            masked = res.get("masked_token")
+            acc_name = res.get("account_name")
+            await status_msg.edit_text(
+                f"✅ *Токен Т-Инвестиций успешно подключен!*\n\n"
+                f"• **Токен:** `{masked}`\n"
+                f"• **Счёт:** `{acc_name}`\n"
+                f"• **Режим защиты:** 🔒 *Только чтение (Read-Only)*\n"
+                f"• Ваше сообщение с токеном было автоматически удалено из чата для безопасности.\n\n"
+                f"Теперь вам доступен реальный анализ вашего портфеля!",
+                parse_mode="Markdown",
+                reply_markup=get_broker_inline_keyboard(is_configured=True),
+            )
+            return
+
+        # Check if user is searching for a ticker analysis
+        if user_id in _waiting_for_ticker_analysis:
+            _waiting_for_ticker_analysis.discard(user_id)
+            ticker = text.strip().upper()
+            status_msg = await message.answer(f"🔍 Запуск AI-анализа акции `{ticker}`...")
+            re = get_recommendation_engine()
+            if not re:
+                await status_msg.edit_text("❌ Модуль аналитики недоступен.")
+                return
+
+            analysis = await asyncio.to_thread(re.analyze_ticker, ticker)
+            name = analysis.get("name", ticker)
+            sector = analysis.get("sector", "Рынок РФ")
+            sig = analysis.get("signal", "BUY")
+            sig_badge = "🟢 ПОКУПКА" if sig == "BUY" else ("🟡 НАКАПЛИВАТЬ" if sig == "ACCUMULATE" else "⚪ ДЕРЖАТЬ")
+            upside = analysis.get("upside", "+15%")
+            horizon = analysis.get("horizon", "3-6 мес")
+            summary = analysis.get("summary", "")
+            drivers = analysis.get("drivers", [])
+            risks = analysis.get("risks", [])
+
+            lines = [
+                f"📊 *Инвестиционный анализ: {name}* (`{ticker}`)\n",
+                f"• **Сектор:** {sector}",
+                f"• **Сигнал:** **{sig_badge}**",
+                f"• **Ожидаемый потенциал:** `{upside}`",
+                f"• **Горизонт инвестирования:** _{horizon}_\n",
+                f"📝 *Вывод аналитика:*\n_{summary}_\n",
+            ]
+            if drivers:
+                lines.append("🚀 *Ключевые драйверы роста:*")
+                for d in drivers:
+                    lines.append(f"• {d}")
+            if risks:
+                lines.append("\n⚠️ *Факторы риска:*")
+                for r in risks:
+                    lines.append(f"• {r}")
+
+            lines.append("\n_Не является индивидуальной инвестиционной рекомендацией._")
+            card_text = "\n".join(lines)
+
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🎯 Топ предложений", callback_data="brk:ideas"),
+                        InlineKeyboardButton(text="🔍 Другой тикер", callback_data="brk:search"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="🔙 В меню Брокера", callback_data="brk:refresh"),
+                    ],
+                ]
+            )
+            await status_msg.edit_text(card_text, parse_mode="Markdown", reply_markup=kb)
+            return
+
+        if text.startswith("/") or text in ["📊 Статус процессов", "📸 Снимок экрана", "⚡ Проверка связи", "🧹 Очистить кэш", "📬 Управление почтой", "📈 Брокер"]:
             return
 
         process_registry.update("autobot_local", status="RUNNING", details=f"Выполняет: '{text}'")
