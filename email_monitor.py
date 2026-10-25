@@ -211,9 +211,13 @@ class EmailMonitor:
                 return stats
 
             msg_ids = messages[0].split()
-            stats["checked"] = len(msg_ids)
+            total_unseen = len(msg_ids)
+            # Process up to 10 latest unread emails per scan to respect rate limits and keep response snappy
+            batch = msg_ids[-10:]
+            stats["checked"] = len(batch)
+            stats["total_unseen"] = total_unseen
 
-            for mid in msg_ids:
+            for mid in batch:
                 res, data = imap.fetch(mid, "(RFC822)")
                 if res != "OK":
                     continue
