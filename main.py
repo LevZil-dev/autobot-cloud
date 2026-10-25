@@ -105,10 +105,16 @@ async def lifespan(app: FastAPI):
 
     print("🚀 [Render Startup] Запуск облачных сервисов AutoBot...")
 
+    email_mon = None
+    try:
+        email_mon = EmailMonitor()
+    except Exception as em_err:
+        print(f"⚠️ [Render] EmailMonitor init warning: {em_err}")
+
     # 1. Start Telegram Bot if token configured and dispatcher available
     if cfg.TELEGRAM_BOT_TOKEN and create_dispatcher is not None:
         try:
-            bot_instance, bot_dp = await create_dispatcher()
+            bot_instance, bot_dp = await create_dispatcher(email_monitor=email_mon)
             t_bot = asyncio.create_task(bot_dp.start_polling(bot_instance))
             bg_tasks.append(t_bot)
             print("✅ [Render] Telegram Hub успешно запущен в фоне.")

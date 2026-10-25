@@ -7,6 +7,7 @@ import email
 from email.header import decode_header
 import json
 import time
+import os
 from typing import Any
 from google import genai
 from google.genai import types

@@ -47,12 +47,28 @@ _email_monitor_instance = None
 
 def get_email_monitor():
     global _email_monitor_instance
-    if _email_monitor_instance is None and EmailMonitor is not None:
+    if _email_monitor_instance is not None:
+        return _email_monitor_instance
+
+    cls = EmailMonitor
+    if cls is None:
+        for mod_name in ["email_monitor", "cloud.email_monitor"]:
+            try:
+                mod = __import__(mod_name, fromlist=["EmailMonitor"])
+                cls = getattr(mod, "EmailMonitor", None)
+                if cls:
+                    break
+            except Exception:
+                pass
+
+    if cls is not None:
         try:
-            _email_monitor_instance = EmailMonitor()
+            _email_monitor_instance = cls()
+            return _email_monitor_instance
         except Exception as e:
             print(f"[Bot Service] Warning: EmailMonitor init error: {e}")
-    return _email_monitor_instance
+            raise e
+    return None
 
 
 def get_main_keyboard() -> ReplyKeyboardMarkup:
@@ -110,7 +126,10 @@ def format_email_menu_text(stats: dict) -> str:
     )
 
 
-async def create_dispatcher() -> tuple[Bot, Dispatcher]:
+async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
+    global _email_monitor_instance
+    if email_monitor is not None:
+        _email_monitor_instance = email_monitor
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 
@@ -194,13 +213,13 @@ async def create_dispatcher() -> tuple[Bot, Dispatcher]:
     @dp.message(Command("email"))
     @dp.message(F.text == "📬 Управление почтой")
     async def cmd_email_menu(message: types.Message):
-        monitor = get_email_monitor()
-        if not monitor:
-            await message.answer("❌ Модуль управления почтой недоступен. Проверьте настройки .env.")
-            return
-
         status_msg = await message.answer("🔄 Подключение к почтовому ящику...")
         try:
+            monitor = get_email_monitor()
+            if not monitor:
+                await status_msg.edit_text("❌ Модуль управления почтой не найден. Проверьте настройки EMAIL_USER / EMAIL_PASS.")
+                return
+
             stats = await asyncio.to_thread(monitor.get_mailbox_stats)
             text = format_email_menu_text(stats)
             kb = get_email_inline_keyboard(stats.get("dry_run", True))
