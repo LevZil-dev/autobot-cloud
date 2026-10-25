@@ -9,19 +9,69 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-# Add project root to sys.path
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT_DIR))
+# Add current folder and parent folder to sys.path
+CURRENT_DIR = Path(__file__).resolve().parent
+PARENT_DIR = CURRENT_DIR.parent
+for p in [str(CURRENT_DIR), str(PARENT_DIR)]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import uvicorn
 
-import cloud.config as cfg
-from cloud.email_monitor import EmailMonitor
-from tg_bot.process_registry import process_registry
-from tg_bot.notifier import tg_notifier
-from tg_bot.bot_service import create_dispatcher
+# Flexible imports supporting both root-level and package-level repository layouts
+try:
+    from . import config as cfg
+    from .email_monitor import EmailMonitor
+except (ImportError, ValueError):
+    try:
+        import cloud.config as cfg
+        from cloud.email_monitor import EmailMonitor
+    except (ImportError, ValueError):
+        import config as cfg
+        from email_monitor import EmailMonitor
+
+try:
+    from tg_bot.process_registry import process_registry
+    from tg_bot.notifier import tg_notifier
+    from tg_bot.bot_service import create_dispatcher
+except ImportError:
+    import json
+    class _DummyProcessRegistry:
+        def __init__(self):
+            self.processes = {}
+        def update(self, name, status, details=""):
+            self.processes[name] = {"status": status, "details": details, "updated_at": time.time()}
+        def get(self, *args, **kwargs):
+            return {}
+        def get_all(self):
+            return self.processes
+
+    process_registry = _DummyProcessRegistry()
+
+    class _FallbackNotifier:
+        def send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
+            print(f"[Telegram Notification]: {text}")
+            token = getattr(cfg, "TELEGRAM_BOT_TOKEN", "") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+            chat_id = getattr(cfg, "TELEGRAM_ADMIN_CHAT_ID", "") or os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+            if token and chat_id:
+                try:
+                    import urllib.request
+                    url = f"https://api.telegram.org/bot{token}/sendMessage"
+                    payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": parse_mode}).encode("utf-8")
+                    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=8) as r:
+                        return r.status == 200
+                except Exception as ex:
+                    print(f"[FallbackNotifier Warning]: {ex}")
+            return False
+
+        async def send_message_async(self, text: str, parse_mode: str = "Markdown") -> bool:
+            return self.send_message(text, parse_mode)
+
+    tg_notifier = _FallbackNotifier()
+    create_dispatcher = None
 
 START_TIME = time.time()
 bot_instance = None
@@ -55,8 +105,8 @@ async def lifespan(app: FastAPI):
 
     print("🚀 [Render Startup] Запуск облачных сервисов AutoBot...")
 
-    # 1. Start Telegram Bot if token configured
-    if cfg.TELEGRAM_BOT_TOKEN:
+    # 1. Start Telegram Bot if token configured and dispatcher available
+    if cfg.TELEGRAM_BOT_TOKEN and create_dispatcher is not None:
         try:
             bot_instance, bot_dp = await create_dispatcher()
             t_bot = asyncio.create_task(bot_dp.start_polling(bot_instance))
@@ -123,4 +173,4 @@ async def check_email_now():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("cloud.main:app", host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)

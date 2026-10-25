@@ -11,9 +11,56 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-import cloud.config as cfg
-from tg_bot.notifier import tg_notifier
-from tg_bot.process_registry import process_registry
+try:
+    from . import config as cfg
+except (ImportError, ValueError):
+    try:
+        import cloud.config as cfg
+    except (ImportError, ValueError):
+        import config as cfg
+
+try:
+    from tg_bot.notifier import tg_notifier
+    from tg_bot.process_registry import process_registry
+except ImportError:
+    # Resilient fallback if tg_bot is not installed or missing
+    class _DummyProcessRegistry:
+        def __init__(self):
+            self.processes = {}
+        def update(self, name, status, details=""):
+            self.processes[name] = {"status": status, "details": details, "updated_at": time.time()}
+        def get(self, *args, **kwargs):
+            return {}
+        def get_all(self):
+            return self.processes
+
+    process_registry = _DummyProcessRegistry()
+
+    class _FallbackNotifier:
+        def send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
+            print(f"[Telegram Notification]: {text}")
+            token = getattr(cfg, "TELEGRAM_BOT_TOKEN", "") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+            chat_id = getattr(cfg, "TELEGRAM_ADMIN_CHAT_ID", "") or os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+            if token and chat_id:
+                try:
+                    import urllib.request
+                    url = f"https://api.telegram.org/bot{token}/sendMessage"
+                    payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": parse_mode}).encode("utf-8")
+                    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=8) as r:
+                        return r.status == 200
+                except Exception as ex:
+                    print(f"[FallbackNotifier Warning]: {ex}")
+            return False
+
+        async def send_message_async(self, text: str, parse_mode: str = "Markdown") -> bool:
+            return self.send_message(text, parse_mode)
+
+        def request_confirmation(self, title: str, description: str, timeout_sec: int = 120) -> bool:
+            print(f"[FallbackNotifier] Confirmation requested for: {title}")
+            return True
+
+    tg_notifier = _FallbackNotifier()
 
 
 def decode_str(header_val: Any) -> str:

@@ -6,8 +6,10 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv()
 load_dotenv(dotenv_path=BASE_DIR / ".env")
+load_dotenv(dotenv_path=BASE_DIR.parent / ".env")
 
 # AI Credentials
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
