@@ -124,6 +124,10 @@ class EmailMonitor:
             except Exception as e:
                 print(f"[Email Monitor] Warning: AI client init error: {e}")
 
+        # In-memory cache for all senders catalog
+        self._all_senders_cache: list[dict[str, Any]] = []
+        self._all_senders_cache_time: float = 0.0
+
     def connect(self) -> imaplib.IMAP4_SSL:
         """Establishes an SSL connection to the IMAP server."""
         if not self.user or not self.password:
@@ -245,6 +249,91 @@ class EmailMonitor:
                 imap.logout()
             except Exception:
                 pass
+
+    def scan_all_senders(self, force_refresh: bool = False, max_messages: int = 15000) -> list[dict[str, Any]]:
+        """Scans the entire INBOX and returns all unique senders sorted by message volume."""
+        from email.utils import parseaddr
+
+        if not force_refresh and self._all_senders_cache and (time.time() - self._all_senders_cache_time < 300):
+            return self._all_senders_cache
+
+        imap = self.connect()
+        try:
+            imap.select("INBOX", readonly=True)
+            status, counts = imap.search(None, "ALL")
+            if status != "OK" or not counts[0]:
+                return []
+
+            ids = counts[0].split()
+            target_ids = ids[-max_messages:]
+
+            senders_map: dict[str, dict[str, Any]] = {}
+            chunk_size = 500
+            for i in range(0, len(target_ids), chunk_size):
+                chunk = target_ids[i : i + chunk_size]
+                res, data = imap.fetch(b",".join(chunk), "(BODY.PEEK[HEADER.FIELDS (FROM)])")
+                if res == "OK":
+                    for item in data:
+                        if isinstance(item, tuple) and len(item) == 2:
+                            msg = email.message_from_bytes(item[1])
+                            raw_from = msg.get("From", "")
+                            name, addr = parseaddr(raw_from)
+                            addr = addr.lower().strip()
+                            clean_name = decode_str(name).strip() or (addr.split("@")[0] if "@" in addr else addr)
+                            if addr:
+                                if addr not in senders_map:
+                                    senders_map[addr] = {
+                                        "name": clean_name,
+                                        "email": addr,
+                                        "total_count": 0,
+                                        "domain": addr.split("@")[-1] if "@" in addr else "",
+                                    }
+                                senders_map[addr]["total_count"] += 1
+
+            sorted_senders = sorted(senders_map.values(), key=lambda x: x["total_count"], reverse=True)
+            self._all_senders_cache = sorted_senders
+            self._all_senders_cache_time = time.time()
+            return sorted_senders
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+    def get_senders_page(self, page: int = 1, page_size: int = 8, query: str = "") -> dict[str, Any]:
+        """Returns paginated senders list."""
+        all_senders = self.scan_all_senders(force_refresh=False)
+        if query:
+            q = query.lower().strip()
+            all_senders = [s for s in all_senders if q in s["name"].lower() or q in s["email"].lower()]
+
+        total_items = len(all_senders)
+        total_pages = max(1, (total_items + page_size - 1) // page_size)
+        page = max(1, min(page, total_pages))
+
+        start = (page - 1) * page_size
+        items = all_senders[start : start + page_size]
+        return {
+            "items": items,
+            "page": page,
+            "total_pages": total_pages,
+            "total_items": total_items,
+        }
+
+    def generate_senders_file_report(self) -> str:
+        """Generates a complete text catalog of all senders stored in the mailbox."""
+        senders = self.scan_all_senders(force_refresh=False)
+        lines = [
+            f"===========================================================",
+            f" ПОЛНЫЙ КАТАЛОГ ВСЕХ ОТПРАВИТЕЛЕЙ ПОЧТОВОГО ЯЩИКА",
+            f" Аккаунт: {self.user}",
+            f" Всего уникальных отправителей: {len(senders)}",
+            f" Дата формирования: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"===========================================================\n",
+        ]
+        for idx, s in enumerate(senders, 1):
+            lines.append(f"{idx:4d}. {s['name']:<35} | {s['email']:<40} | Писем: {s['total_count']}")
+        return "\n".join(lines)
 
     def delete_all_from_sender(self, sender_query: str, only_unread: bool = False, force: bool = False) -> dict[str, Any]:
         """Deletes (moves to Trash) all emails from a specific sender or domain."""

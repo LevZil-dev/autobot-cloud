@@ -92,7 +92,7 @@ def get_email_inline_keyboard(dry_run: bool = True) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="👥 Топ отправителей", callback_data="mail:senders"),
+                InlineKeyboardButton(text="👥 Все отправители (Каталог)", callback_data="mail:all_senders:1"),
                 InlineKeyboardButton(text="📩 Свежие письма", callback_data="mail:recent"),
             ],
             [
@@ -257,30 +257,49 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
             except Exception as e:
                 await query.answer(f"Ошибка: {e}", show_alert=True)
 
-        elif action == "senders":
-            await query.answer("Отслеживание всех отправителей...")
-            await query.message.edit_text("⏳ Анализирую входящие сообщения и активных отправителей...")
+        elif action.startswith("all_senders") or action == "senders":
+            page = 1
+            if ":" in action:
+                try:
+                    page = int(action.split(":")[1])
+                except Exception:
+                    page = 1
+
+            await query.answer(f"Загрузка каталога (стр. {page})...")
+            if page == 1 and not monitor._all_senders_cache:
+                await query.message.edit_text("⏳ Сканирую весь почтовый ящик (первый запуск займет ~15 сек)...")
+
             try:
                 user_id = query.from_user.id
-                tracked = await asyncio.to_thread(monitor.get_tracked_senders, 50, 8)
-                if not tracked:
-                    text = "👥 *Отслеживание отправителей:* Непрочитанных писем не найдено."
+                page_data = await asyncio.to_thread(monitor.get_senders_page, page, 8)
+                items = page_data["items"]
+                cur_page = page_data["page"]
+                total_pages = page_data["total_pages"]
+                total_items = page_data["total_items"]
+
+                if not items:
+                    text = "👥 *Каталог отправителей:* Писем не найдено."
                     await query.message.edit_text(text, parse_mode="Markdown", reply_markup=back_kb)
                 else:
-                    _sender_cache[user_id] = {i: s for i, s in enumerate(tracked, 1)}
+                    _sender_cache[user_id] = {i: s for i, s in enumerate(items, 1)}
                     lines = [
-                        "👥 *Отслеживание отправителей (Входящие)*\n"
-                        "_(Рейтинг активности по недавним непрочитанным письмам)_\n"
+                        f"👥 *Каталог всех отправителей почты*\n"
+                        f"• Всего уникальных отправителей: **{total_items}**\n"
+                        f"• Страница: **{cur_page} из {total_pages}**\n"
+                        f"_(Отсортированы по общему объему писем во Входящих)_\n"
                     ]
-                    for i, item in enumerate(tracked, 1):
-                        lines.append(f"**{i}.** 👤 **{item['name']}**\n   📧 `{item['email']}` — **{item['unread']}** непр.\n")
-                    lines.append("👇 *Нажмите на отправителя, чтобы удалить все письма от него:*")
+                    start_num = (cur_page - 1) * 8
+                    for i, s in enumerate(items, 1):
+                        global_idx = start_num + i
+                        lines.append(f"**{global_idx}.** 👤 **{s['name']}**\n   📧 `{s['email']}` — **{s['total_count']}** писем\n")
+
+                    lines.append("👇 *Нажмите на кнопку отправителя для удаления его писем:*")
                     text = "\n".join(lines)
 
                     sender_buttons = []
                     row = []
-                    for i, s in enumerate(tracked, 1):
-                        s_label = f"🗑️ {i}. {s['name'][:10]}"
+                    for i, s in enumerate(items, 1):
+                        s_label = f"🗑️ {i}. {s['name'][:11]}"
                         row.append(InlineKeyboardButton(text=s_label, callback_data=f"sndr:p:{i}"))
                         if len(row) == 2:
                             sender_buttons.append(row)
@@ -288,17 +307,53 @@ async def create_dispatcher(email_monitor=None) -> tuple[Bot, Dispatcher]:
                     if row:
                         sender_buttons.append(row)
 
+                    # Pagination row
+                    nav_row = []
+                    if cur_page > 1:
+                        nav_row.append(InlineKeyboardButton(text="◀ Назад", callback_data=f"mail:all_senders:{cur_page - 1}"))
+                    nav_row.append(InlineKeyboardButton(text=f"📄 {cur_page}/{total_pages}", callback_data=f"mail:all_senders:{cur_page}"))
+                    if cur_page < total_pages:
+                        nav_row.append(InlineKeyboardButton(text="Вперед ▶", callback_data=f"mail:all_senders:{cur_page + 1}"))
+                    sender_buttons.append(nav_row)
+
+                    # Export & search row
                     sender_buttons.append([
-                        InlineKeyboardButton(text="🔍 Удалить по email/домену", callback_data="sndr:custom"),
-                        InlineKeyboardButton(text="🔄 Обновить", callback_data="mail:senders"),
+                        InlineKeyboardButton(text="📥 Скачать каталог (.txt)", callback_data="mail:download_catalog"),
+                        InlineKeyboardButton(text="🔍 Поиск по email", callback_data="sndr:custom"),
                     ])
                     sender_buttons.append([
                         InlineKeyboardButton(text="🔙 Назад к почте", callback_data="mail:refresh"),
                     ])
+
                     kb = InlineKeyboardMarkup(inline_keyboard=sender_buttons)
                     await query.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
             except Exception as e:
-                await query.message.edit_text(f"❌ Ошибка анализа отправителей: {e}", reply_markup=back_kb)
+                await query.message.edit_text(f"❌ Ошибка сканирования каталога: {e}", reply_markup=back_kb)
+
+        elif action == "download_catalog":
+            await query.answer("Формирование полного отчета...")
+            status_msg = await query.message.answer("⏳ Составляю файл со всеми отправителями...")
+            try:
+                report_txt = await asyncio.to_thread(monitor.generate_senders_file_report)
+                temp_dir = Path("temp")
+                temp_dir.mkdir(exist_ok=True)
+                file_path = temp_dir / "all_senders.txt"
+                with open(file_path, "w", encoding="utf-8") as fp:
+                    fp.write(report_txt)
+
+                doc_file = types.FSInputFile(str(file_path))
+                await query.message.answer_document(
+                    document=doc_file,
+                    caption=(
+                        f"📄 *Полный каталог отправителей почтового ящика*\n"
+                        f"• Аккаунт: `{monitor.user}`\n"
+                        f"• В файле собраны все уникальные отправители и число писем от каждого."
+                    ),
+                    parse_mode="Markdown"
+                )
+                await status_msg.delete()
+            except Exception as e:
+                await status_msg.edit_text(f"❌ Ошибка выгрузки каталога: {e}")
 
         elif action == "recent":
             await query.answer("Загрузка писем...")
